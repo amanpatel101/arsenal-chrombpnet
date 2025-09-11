@@ -17,8 +17,13 @@ from lightning.pytorch.utilities.types import STEP_OUTPUT
 import numpy as np
 import argparse
 
-from .chrombpnet import BPNet, ChromBPNet
-from .model_config import ChromBPNetConfig
+from .chrombpnet import BPNet, ChromBPNet, ArsenalChromBPNet
+from .model_config import ChromBPNetConfig, ArsenalChromBPNetConfig
+import os
+import sys
+arsenal_dir = os.environ.get("ARSENAL_MODEL_DIR", "")
+sys.path.append(f"{arsenal_dir}/src/regulatory_lm/")
+from modeling.model import *
 
 
 def multinomial_nll(logits, true_counts):
@@ -592,6 +597,82 @@ class ChromBPNetWrapper(BPNetWrapper):
         config = ChromBPNetConfig.from_argparse_args(args)
         self.model = ChromBPNet(config)
 
+class ArsenalChromBPNetWrapper(BPNetWrapper):
+    """Wrapper for ArsenalChromBPNet model with specific configurations and loss functions.
+    
+    This wrapper extends the base ModelWrapper to handle ChromBPNet-specific features
+    such as chromatin accessibility predictions and appropriate loss calculations.
+    """
+    
+    def __init__(
+        self,
+        args,
+    ):
+        """Initialize ChromBPNet wrapper.
+        
+        Args:
+            model: ChromBPNet model instance
+            alpha: Weight for count loss
+            beta: Weight for profile loss
+            bias_scaled: Path to bias model if using scaled bias
+            **kwargs: Additional arguments to be passed to the model
+        """
+        super().__init__(args)
+
+        config = ArsenalChromBPNetConfig.from_argparse_args(args)
+        arsenal_model = torch.load(args.arsenal_model, weights_only=False)
+        self.model = ArsenalChromBPNet(config, arsenal_model)
+        self.arsenal_output_type = args.arsenal_output_type
+
+    def configure_optimizers(self):
+        if self.arsenal_output_type == "likelihood":
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, eps=1e-7)
+        elif self.arsenal_output_type == "embedding":
+            optimizer = torch.optim.Adam(self.model.parameters(), lr=0.0001, eps=1e-7)
+        return optimizer
+
+
+    def _step(self, batch, batch_idx, mode='train'):
+        if (mode != "train") or (not self.model.finetune):
+            self.model.arsenal_model.eval()
+        x = batch['onehot_seq'] # batch_size x 4 x seq_length
+        true_profile = batch['profile'] # batch_size x seq_length
+        true_counts = torch.log1p(true_profile.sum(dim=-1))
+
+        y_profile, y_count = self(x)
+        y_count = y_count.squeeze(-1) # batch_size x 1
+
+        if mode == 'predict':
+            return {
+                'pred_count': _to_numpy(y_count),
+                'true_count': _to_numpy(true_counts),
+                'pred_profile': _to_numpy(y_profile), #.softmax(-1)),
+                'true_profile': _to_numpy(true_profile),
+            }
+
+        self.metrics[mode]['preds'].append(y_count)
+        self.metrics[mode]['targets'].append(true_counts)
+        with torch.no_grad():
+            # count_pearson = pearson_corr(y_count, true_counts).mean()
+            profile_pearson = pearson_corr(y_profile.softmax(-1), true_profile).mean()
+            self.log_dict({f"{mode}_profile_pearson": profile_pearson}, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        profile_loss = multinomial_nll(y_profile, true_profile)
+        count_loss = F.mse_loss(y_count, true_counts)
+        loss = self.beta * profile_loss + self.alpha * count_loss
+
+        dict_show = {
+            f'{mode}_loss': loss, 
+            f'{mode}_profile_loss': profile_loss,
+            f'{mode}_count_loss': count_loss,
+        }
+
+        self.log_dict(dict_show, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+
+        return loss
+
+
+
 
 def create_model_wrapper(
     args,
@@ -620,28 +701,37 @@ def create_model_wrapper(
         if args.chrombpnet_wo_bias:
             model_wrapper.model.model = model_wrapper.init_chrombpnet_wo_bias(args.chrombpnet_wo_bias, freeze=False)
         return model_wrapper
+    elif model_type == 'arsenal-chrombpnet':
+        model_wrapper = ArsenalChromBPNetWrapper(args)
+        if args.bias_scaled:
+            model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
+        if args.chrombpnet_wo_bias:
+            model_wrapper.model.model = model_wrapper.init_chrombpnet_wo_bias(args.chrombpnet_wo_bias, freeze=False)
+        return model_wrapper
+
     else:
         raise ValueError(f"Unknown model type: {model_type}") 
 
 
-def load_pretrained_model(checkpoint):
+def load_pretrained_model(args, checkpoint):
+    wrapper_class = ArsenalChromBPNetWrapper if args.model_type == "arsenal-chrombpnet" else "chrombpnet"
     if checkpoint is not None:
         if checkpoint.endswith('.ckpt'):
-            model_wrapper = ChromBPNetWrapper.load_from_checkpoint(checkpoint)
+            model_wrapper = wrapper_class.load_from_checkpoint(checkpoint)
             return model_wrapper
                 
         elif checkpoint.endswith('.pt'):
-            model_wrapper = ChromBPNetWrapper(args)
+            model_wrapper = wrapper_class(args)
             model_wrapper.model.model.load_state_dict(torch.load(checkpoint, map_location='cpu'))
             return model_wrapper
         elif checkpoint.endswith('.h5'):  
-            model_wrapper = ChromBPNetWrapper(args)
+            model_wrapper = wrapper_class(args)
             # For Keras H5 files, load using the from_keras method
             print(f"Loading chrombpnet_wo_bias model from {checkpoint}")
             model_wrapper.model.model = BPNet.from_keras(checkpoint)
             return model_wrapper
     else:
-        model_wrapper = ChromBPNetWrapper(args)
+        model_wrapper = wrapper_class(args)
 
     return model_wrapper
 

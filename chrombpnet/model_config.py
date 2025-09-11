@@ -86,3 +86,47 @@ class ChromBPNetConfig(BaseConfig):
         self.n_control_tracks = n_control_tracks
         self.profile_output_bias = profile_output_bias
         self.count_output_bias = count_output_bias
+
+
+
+class ArsenalChromBPNetConfig(BaseConfig):
+    r"""
+    
+    ```"""
+
+    model_type = "arsenal-chrombpnet"
+
+    def __init__(
+        self,
+        input_len:int=2114,
+        out_dim:int=1000,
+        n_filters:int=512, 
+        n_layers:int=8, 
+        conv1_kernel_size:int=21,
+        profile_kernel_size:int=75,
+        n_outputs:int=1, 
+        n_control_tracks:int=0, 
+        profile_output_bias:int=True, 
+        count_output_bias:int=True, 
+        finetune_arsenal: bool = False,
+        arsenal_output_type: str = "embedding",
+        input_embedding_dim: int = 512,
+        arsenal_input_size: int = 2114,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.input_len = input_len
+        self.out_dim = out_dim
+        self.n_filters = n_filters
+        self.n_layers = n_layers
+        self.conv1_kernel_size = conv1_kernel_size
+        self.profile_kernel_size = profile_kernel_size
+        self.n_outputs = n_outputs
+        self.n_control_tracks = n_control_tracks
+        self.profile_output_bias = profile_output_bias
+        self.count_output_bias = count_output_bias
+        self.finetune_arsenal = finetune_arsenal
+        self.arsenal_output_type = arsenal_output_type
+        self.input_embedding_dim = input_embedding_dim
+        self.arsenal_input_size = arsenal_input_size

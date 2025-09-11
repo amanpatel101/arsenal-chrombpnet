@@ -35,8 +35,8 @@ from lightning.pytorch.strategies import DDPStrategy
 L.seed_everything(1234)
 
 # Import local modules
-from chrombpnet.chrombpnet import BPNet, ChromBPNet
-from chrombpnet.model_config import ChromBPNetConfig
+from chrombpnet.chrombpnet import BPNet, ChromBPNet, ArsenalChromBPNet
+from chrombpnet.model_config import ChromBPNetConfig, ArsenalChromBPNetConfig
 from chrombpnet.model_wrappers import create_model_wrapper, load_pretrained_model, adjust_bias_model_logcounts
 from chrombpnet.dataset import DataModule
 from chrombpnet.data_config import DataConfig
@@ -90,9 +90,32 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                             help='Gradient clipping value')
     parser.add_argument('--force', action='store_true', default=False,
                             help='Force training even if model already exists')
+    parser.add_argument('--arsenal_model', type=str, default=None,
+                        help="ARSENAL model path")
+    # parser.add_argument('--input_embedding_dim', type=int, default=512,
+    #                     help="Input dimension to ChromBPNet model (ie. ARSENAL output)")
+    # parser.add_argument('--arsenal_output_type', type=str, default="embedding", choices=["embedding", "likelihood"],
+    #                     help="Type of ARSENAL output to use")
+    # parser.add_argument('--finetune_arsenal', action='store_true', default=False,
+    #                     help="Whether to finetune ARSENAL model along with training the rest")
+    # parser.add_argument('--arsenal_input_size', type=int, default=2114,
+    #                     help="Chunk size at which to feed input to ARSENAL model")
+
+
+
     
-    # Add model-specific arguments
-    ChromBPNetConfig.add_argparse_args(parser)
+        # Add model-specific arguments
+    # # Parse only the model_type argument first
+    # temp_parser = argparse.ArgumentParser(add_help=False)
+    # temp_parser.add_argument('--model_type', type=str, default='chrombpnet')
+    # temp_args, _ = temp_parser.parse_known_args()
+
+    # # Now add model-specific arguments based on model_type
+    # if temp_args.model_type == 'chrombpnet':
+    #     ChromBPNetConfig.add_argparse_args(parser)
+    # elif temp_args.model_type == 'arsenal-chrombpnet':
+    #     ArsenalChromBPNetConfig.add_argparse_args(parser)
+    ArsenalChromBPNetConfig.add_argparse_args(parser)    
     DataConfig.add_argparse_args(parser)
 
 def get_parser() -> argparse.ArgumentParser:
@@ -142,7 +165,7 @@ def load_model(args):
         else:
             args.checkpoint = checkpoint
             print(f'Loading checkpoint from {checkpoint}')
-    model = load_pretrained_model(args)
+    model = load_pretrained_model(args, checkpoint)
     return model
 
 def compare_predictions(out_dir, chrom):
@@ -211,7 +234,7 @@ def train(args):
         # precision="bf16"
     )
     trainer.fit(model, datamodule)
-    if args.model_type == 'chrombpnet' and not args.fast_dev_run:
+    if 'chrombpnet' in args.model_type and not args.fast_dev_run:
         torch.save(model.model.model.state_dict(), os.path.join(out_dir, 'checkpoints/chrombpnet_wo_bias.pt'))
 
 def finetune(args):
