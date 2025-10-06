@@ -9,18 +9,19 @@ from chrombpnet.data_utils import dna_to_one_hot, read_chrom_sizes
 def update_scoring_args(parser):
     parser.add_argument("-l", "--list", type=str, required=True, help="a TSV file containing a list of variants to score")
     parser.add_argument("-g", "--genome", type=str, required=True, help="Genome fasta")
+    parser.add_argument("-mt", "--model_type", type=str, help="Type of model to use", default="chrombpnet")
     parser.add_argument("-m", "--model", type=str, required=True, help="ChromBPNet model to use for variant scoring")
     parser.add_argument("-o", "--out_prefix", type=str, required=True, help="Path to storing snp effect score predictions from the script, directory should already exist")
     parser.add_argument("-p", "--peaks", type=str, help="Bed file containing peak regions")
     parser.add_argument("-s", "--chrom_sizes", type=str, required=True, help="Path to TSV file with chromosome sizes")
-    parser.add_argument("-ps", "--peak_chrom_sizes", type=str, required=True, help="Path to TSV file with chromosome sizes for peak genome")
+    parser.add_argument("-ps", "--peak_chrom_sizes", type=str, help="Path to TSV file with chromosome sizes for peak genome")
     parser.add_argument("-b", "--bias", type=str, help="Bias model to use for variant scoring")
     parser.add_argument("-li", "--lite", action='store_true', default=True, help="Models were trained with chrombpnet-lite")
     parser.add_argument("-dm", "--debug_mode", action='store_true', help="Display allele input sequences")
     parser.add_argument("-bs", "--batch_size", type=int, default=512, help="Batch size to use for the model")
     parser.add_argument("-sc", "--schema", type=str, choices=['bed', 'plink', 'chrombpnet', 'original'], default='chrombpnet', help="Format for the input variants list")
     parser.add_argument("-n", "--num_shuf", type=int, default=10, help="Number of shuffled scores per SNP")
-    parser.add_argument("-t", "--total_shuf", type=int, default=2, help="Total number of shuffled scores across all SNPs. Overrides --num_shuf")
+    parser.add_argument("-t", "--total_shuf", type=int, help="Total number of shuffled scores across all SNPs. Overrides --num_shuf")
     parser.add_argument("-mp", "--max_peaks", type=int, help="Maximum number of peaks to use for peak percentile calculation")
     parser.add_argument("-c", "--chrom", type=str, help="Only score SNPs in selected chromosome")
     parser.add_argument("-r", "--random_seed", type=int, default=1234, help="Random seed for reproducibility when sampling")
@@ -87,9 +88,9 @@ def fetch_variant_annotation_args():
 # ------------------------------------------------------------------------------------------------
 # utils
 # ------------------------------------------------------------------------------------------------
-from tensorflow.keras.utils import get_custom_objects
-from tensorflow.keras.models import load_model
-import tensorflow as tf
+# from tensorflow.keras.utils import get_custom_objects
+# from tensorflow.keras.models import load_model
+# import tensorflow as tf
 from scipy.spatial.distance import jensenshannon
 import pandas as pd
 import numpy as np
@@ -247,37 +248,41 @@ def fetch_variant_predictions(model, variants_table, input_len, genome_fasta, ba
                            debug_mode=False,
                            shuf=shuf)
 
+    if lite:
+        import torch
+        if torch.cuda.is_available():
+            model = model.cuda()
     for i in tqdm(range(len(var_gen))):
 
         batch_variant_ids, allele1_seqs, allele2_seqs = var_gen[i]
+        allele1_seqs = np.transpose(allele1_seqs, (0,2,1))
+        allele2_seqs = np.transpose(allele2_seqs, (0,2,1))
         revcomp_allele1_seqs = allele1_seqs[:, ::-1, ::-1]
         revcomp_allele2_seqs = allele2_seqs[:, ::-1, ::-1]
 
         if lite:
-
-            import torch
-            allele1_seqs = torch.from_numpy(allele1_seqs).float()
-            allele2_seqs = torch.from_numpy(allele2_seqs).float()
-            if torch.cuda.is_available():
-                model.cuda()
-                allele1_seqs = allele1_seqs.cuda()
-                allele2_seqs = allele2_seqs.cuda()
-            allele1_batch_preds = model(allele1_seqs)
-            allele2_batch_preds = model(allele2_seqs)
-            if not forward_only:
-                revcomp_allele1_seqs = torch.from_numpy(revcomp_allele1_seqs.copy()).float()
-                revcomp_allele2_seqs = torch.from_numpy(revcomp_allele2_seqs.copy()).float()
+            with torch.no_grad():
+                allele1_seqs = torch.from_numpy(allele1_seqs).float()
+                allele2_seqs = torch.from_numpy(allele2_seqs).float()
                 if torch.cuda.is_available():
-                    revcomp_allele1_seqs = revcomp_allele1_seqs.cuda()
-                    revcomp_allele2_seqs = revcomp_allele2_seqs.cuda()
-                revcomp_allele1_batch_preds = model(revcomp_allele1_seqs)
-                revcomp_allele2_batch_preds = model(revcomp_allele2_seqs)
+                    allele1_seqs = allele1_seqs.cuda()
+                    allele2_seqs = allele2_seqs.cuda()
+                allele1_batch_preds = model(allele1_seqs)
+                allele2_batch_preds = model(allele2_seqs)
+                if not forward_only:
+                    revcomp_allele1_seqs = torch.from_numpy(revcomp_allele1_seqs.copy()).float()
+                    revcomp_allele2_seqs = torch.from_numpy(revcomp_allele2_seqs.copy()).float()
+                    if torch.cuda.is_available():
+                        revcomp_allele1_seqs = revcomp_allele1_seqs.cuda()
+                        revcomp_allele2_seqs = revcomp_allele2_seqs.cuda()
+                    revcomp_allele1_batch_preds = model(revcomp_allele1_seqs)
+                    revcomp_allele2_batch_preds = model(revcomp_allele2_seqs)
 
-            allele1_batch_preds = [i.cpu().detach().numpy() for i in allele1_batch_preds]
-            allele2_batch_preds = [i.cpu().detach().numpy() for i in allele2_batch_preds]
-            if not forward_only:
-                revcomp_allele1_batch_preds = [i.cpu().detach().numpy() for i in revcomp_allele1_batch_preds]
-                revcomp_allele2_batch_preds = [i.cpu().detach().numpy() for i in revcomp_allele2_batch_preds]
+                allele1_batch_preds = [i.cpu().detach().numpy() for i in allele1_batch_preds]
+                allele2_batch_preds = [i.cpu().detach().numpy() for i in allele2_batch_preds]
+                if not forward_only:
+                    revcomp_allele1_batch_preds = [i.cpu().detach().numpy() for i in revcomp_allele1_batch_preds]
+                    revcomp_allele2_batch_preds = [i.cpu().detach().numpy() for i in revcomp_allele2_batch_preds]
         else:
             allele1_batch_preds = model.predict(allele1_seqs, verbose=False)
             allele2_batch_preds = model.predict(allele2_seqs, verbose=False)

@@ -29,9 +29,12 @@ from chrombpnet.data_utils import dna_to_one_hot, read_chrom_sizes
 # ------------------------------------------------------------------------------------------------
 # load_model_wrapper
 # ------------------------------------------------------------------------------------------------
-def load_model_wrapper(model_path):
-    from chrombpnet.model_wrappers import init_chrombpnet_wo_bias
-    model = init_chrombpnet_wo_bias(model_path)
+def load_model_wrapper(model_path, model_type):
+    from chrombpnet.model_wrappers import init_chrombpnet_wo_bias, init_arsenal_wo_bias
+    if model_type == "chrombpnet":
+        model = init_chrombpnet_wo_bias(model_path)
+    elif model_type == "arsenal-chrombpnet":
+        model = init_arsenal_wo_bias(model_path)
     # model.to('cuda')
     return model
 
@@ -55,7 +58,7 @@ def main():
         # raise OSError("Output directory does not exist")
 
     # load the model and variants
-    model = load_model_wrapper(args.model)
+    model = load_model_wrapper(args.model, args.model_type)
     variants_table = load_variant_table(args.list, args.schema)
     variants_table = variants_table.fillna('-')
     

@@ -112,6 +112,7 @@ class ArsenalChromBPNetConfig(BaseConfig):
         arsenal_output_type: str = "embedding",
         input_embedding_dim: int = 512,
         arsenal_input_size: int = 2114,
+        category : int = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -130,3 +131,4 @@ class ArsenalChromBPNetConfig(BaseConfig):
         self.arsenal_output_type = arsenal_output_type
         self.input_embedding_dim = input_embedding_dim
         self.arsenal_input_size = arsenal_input_size
+        self.category = category
