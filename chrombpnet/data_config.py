@@ -102,13 +102,12 @@ class DataConfig:
 			self.num_workers = num_workers
 			self.debug = debug
 
-
 			fold_file_path = _datasets.fetch(f'fold_{fold}.json', progressbar=False)
 			splits_dict = json.load(open(fold_file_path))
 			self.training_chroms = splits_dict['train'] if training_chroms is None else training_chroms
 			self.validation_chroms = splits_dict['valid'] if validation_chroms is None else validation_chroms
 			self.test_chroms = splits_dict['test'] if test_chroms is None else test_chroms
-
+			print(test_chroms)
 	
 	def __post_init__(self):
 		"""Validate configuration parameters after initialization."""

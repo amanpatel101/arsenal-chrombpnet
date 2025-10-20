@@ -87,6 +87,22 @@ class ChromBPNet(nn.Module):
 		
 		self.n_control_tracks = config.n_control_tracks
 
+		self.tf_style_reinit()
+
+	def tf_style_reinit(self):
+		"""
+		Re-initializes model weights for Linear and Conv1d layers using
+		TensorFlow's default: Xavier/Glorot uniform for weights, zeros for bias.
+		Operates in-place!
+		"""
+		print("Reinitializing with TF strategy")
+		for m in self.model.modules():
+			if isinstance(m, nn.Conv1d) or isinstance(m, nn.Linear):
+				if hasattr(m, 'weight') and m.weight is not None:
+					nn.init.xavier_uniform_(m.weight)
+				if hasattr(m, 'bias') and m.bias is not None:
+					nn.init.zeros_(m.bias)
+
 	def forward(self, x, **kwargs):
 		"""A forward pass through the network.
 
@@ -115,6 +131,8 @@ class ChromBPNet(nn.Module):
 
 		y_profile = acc_profile + bias_profile
 		y_counts = self._log(self._exp1(acc_counts) + self._exp2(bias_counts))
+		# counts_cat = torch.cat((acc_counts, bias_counts), dim=-1)
+		# y_counts = torch.logsumexp(counts_cat, dim=-1)
 		
 		# DO NOT SQUEEZE y_counts, as it is needed for running deep_lift_shap
 		return y_profile.squeeze(1), y_counts #.squeeze() 
@@ -206,15 +224,52 @@ class ArsenalChromBPNet(nn.Module):
 		
 		self.n_control_tracks = config.n_control_tracks
 
+		self.tf_style_reinit()
+
+	def tf_style_reinit(self):
+		"""
+		Re-initializes model weights for Linear and Conv1d layers using
+		TensorFlow's default: Xavier/Glorot uniform for weights, zeros for bias.
+		Operates in-place!
+		"""
+		print("Reinitializing with TF strategy")
+		for m in self.model.modules():
+			if isinstance(m, nn.Conv1d) or isinstance(m, nn.Linear):
+				if hasattr(m, 'weight') and m.weight is not None:
+					nn.init.xavier_uniform_(m.weight)
+				if hasattr(m, 'bias') and m.bias is not None:
+					nn.init.zeros_(m.bias)
+
+
 	def one_hot_to_tokens(self, X):
 		tokens = torch.argmax(X, dim=-1)
 		n_mask = (X.sum(dim=-1) == 0)
 		tokens[n_mask] = 4
 		return tokens
 
+
+	def normalize_probs(self, probs, tokens):
+		#Calculate entropy-weighted probabilities
+		# keep last dim so it broadcasts over the 4-class channel; clamp for numerical stability
+		# entropy_metric = 2 + (probs * torch.log2(probs)).sum(-1, keepdim=True)
+		# probs_norm = entropy_metric * probs
+		onehot_start = torch.ones_like(probs)
+		#Zero out everywhere except true indices
+		idx = tokens.unsqueeze(-1)
+		clamped = idx.clamp(0, 3)
+		valid = (tokens >= 0) & (tokens < 4)
+		kept = onehot_start.gather(2, clamped)
+		kept = kept.masked_fill(~valid.unsqueeze(-1), 0)
+		onehot_final = torch.zeros_like(onehot_start)
+		onehot_final.scatter_(2, clamped, kept)
+		probs_out = torch.cat((onehot_final, probs), dim=-1)
+		return probs_out
+
 	def get_likelihoods(self, tokens):
 		if self.seq_input_size == self.arsenal_input_size:
 			logits = self.arsenal_model(tokens, self.category)
+			probs = self.softmax(logits)
+			return self.normalize_probs(probs, tokens)
 		#Else case - adapting to different input sizes
 		#We basically break up the sequence into chunks of the model input length
 		#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the logits for previously unpredicted tokens
@@ -224,15 +279,39 @@ class ArsenalChromBPNet(nn.Module):
 				curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
 				if part == 0:
 					logits = self.arsenal_model(curr_tokens, self.category)
+					probs = self.normalize_probs(self.softmax(logits), curr_tokens)
 				else:
 					curr_logits = self.arsenal_model(curr_tokens, self.category)
-					logits = torch.cat((logits, curr_logits), dim=1)
+					curr_probs = self.normalize_probs(self.softmax(curr_logits), curr_tokens)
+					probs = torch.cat((probs, curr_probs), dim=1)
 			#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
 			final_pred = self.arsenal_model(tokens[:,-1*self.arsenal_input_size:], self.category)
-			logits = torch.cat((logits, final_pred[:,-1*remainder:]), dim=1)
-		probs = self.softmax(logits)
+			final_probs = self.normalize_probs(self.softmax(final_pred), tokens[:,-1*self.arsenal_input_size:])
+			probs = torch.cat((probs, final_probs[:,-1*remainder:]), dim=1)
 
 		return probs
+
+	# def get_likelihoods(self, tokens):
+	# 	if self.seq_input_size == self.arsenal_input_size:
+	# 		logits = self.arsenal_model(tokens, self.category)
+	# 	#Else case - adapting to different input sizes
+	# 	#We basically break up the sequence into chunks of the model input length
+	# 	#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the logits for previously unpredicted tokens
+	# 	else:
+	# 		full_partitions, remainder = self.seq_input_size // self.arsenal_input_size, self.seq_input_size % self.arsenal_input_size
+	# 		for part in range(full_partitions):
+	# 			curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
+	# 			if part == 0:
+	# 				logits = self.arsenal_model(curr_tokens, self.category)
+	# 			else:
+	# 				curr_logits = self.arsenal_model(curr_tokens, self.category)
+	# 				logits = torch.cat((logits, curr_logits), dim=1)
+	# 		#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
+	# 		final_pred = self.arsenal_model(tokens[:,-1*self.arsenal_input_size:], self.category)
+	# 		logits = torch.cat((logits, final_pred[:,-1*remainder:]), dim=1)
+	# 	probs = self.softmax(logits)
+
+	# 	return probs
 
 	def get_embeddings(self, tokens):
 		if self.seq_input_size == self.arsenal_input_size:
@@ -284,14 +363,18 @@ class ArsenalChromBPNet(nn.Module):
 		if self.arsenal_output_type == "embedding":
 			x_embs = self.get_embeddings(tokens) #We don't transpose because bpnet code does it for us if dimension is not 4
 		elif self.arsenal_output_type == "likelihood":
-			x_embs = self.get_likelihoods(tokens).transpose(1,2)
+			x_embs = self.get_likelihoods(tokens)
+			if x_embs.shape[-1] == 4:
+				x_embs = x_embs.transpose(1,2)
 
 
 		acc_profile, acc_counts = self.model(x_embs)
 		bias_profile, bias_counts = self.bias(x)
 
 		y_profile = acc_profile + bias_profile
-		y_counts = self._log(self._exp1(acc_counts) + self._exp2(bias_counts))
+		# y_counts = self._log(self._exp1(acc_counts) + self._exp2(bias_counts))
+		counts_cat = torch.cat((acc_counts, bias_counts), dim=-1)
+		y_counts = torch.logsumexp(counts_cat, dim=-1)
 		
 		# DO NOT SQUEEZE y_counts, as it is needed for running deep_lift_shap
 		return y_profile.squeeze(1), y_counts #.squeeze() 

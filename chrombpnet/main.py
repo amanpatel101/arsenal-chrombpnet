@@ -32,6 +32,7 @@ from lightning.pytorch.strategies import DDPStrategy
 # torch.set_float32_matmul_precision('medium')
 
 # Set random seed for reproducibility
+# L.seed_everything(0)
 L.seed_everything(1234)
 
 # Import local modules
@@ -182,6 +183,7 @@ def compare_predictions(out_dir, chrom):
         fontsize=20, xlab='Log Count chrombpnet original', ylab='Log Count pytorch')
 
 def train(args):
+    print(args.bias_scaled)
     data_config = DataConfig.from_argparse_args(args)
     loggers=[L.pytorch.loggers.CSVLogger(args.out_dir, name=args.name, version=f'fold_{args.fold}')]
     out_dir = os.path.join(args.out_dir, args.name, f'fold_{args.fold}')
@@ -205,7 +207,7 @@ def train(args):
     log.info(f'precision: {args.precision}')
 
     datamodule = DataModule(data_config)
-
+    print(datamodule.test_chroms)
     args.alpha = datamodule.median_count / 10
     log.info(f'alpha: {args.alpha}')
 

@@ -16,7 +16,7 @@ from lightning import LightningModule
 from lightning.pytorch.utilities.types import STEP_OUTPUT
 import numpy as np
 import argparse
-
+from torch.distributions.multinomial import Multinomial
 from .chrombpnet import BPNet, ChromBPNet, ArsenalChromBPNet, ArsenalChromBPNetNoBias
 from .model_config import ChromBPNetConfig, ArsenalChromBPNetConfig
 import os
@@ -25,6 +25,11 @@ arsenal_dir = os.environ.get("ARSENAL_MODEL_DIR", "")
 sys.path.append(f"{arsenal_dir}/src/regulatory_lm/")
 from modeling.model import *
 
+
+# def multinomial_nll(logits, true_counts):
+# 	dist = Multinomial(logits=logits, validate_args=False)
+# 	log_probs = dist.log_prob(true_counts.long())
+# 	return -log_probs.mean()
 
 def multinomial_nll(logits, true_counts):
 	"""Compute the multinomial negative log-likelihood in PyTorch.
@@ -741,7 +746,8 @@ def create_model_wrapper(
 
 
 def load_pretrained_model(args, checkpoint):
-	wrapper_class = ArsenalChromBPNetWrapper if args.model_type == "arsenal-chrombpnet" else "chrombpnet"
+	import os
+	wrapper_class = ArsenalChromBPNetWrapper if args.model_type == "arsenal-chrombpnet" else ChromBPNetWrapper
 	if checkpoint is not None:
 		if checkpoint.endswith('.ckpt'):
 			model_wrapper = wrapper_class.load_from_checkpoint(checkpoint)
