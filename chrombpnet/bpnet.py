@@ -114,6 +114,7 @@ class BPNet(torch.nn.Module):
         count_output_bias=True, 
         name=None, 
         verbose=False,
+        custom_dilations=False
     ):
         super().__init__()
 
@@ -123,18 +124,27 @@ class BPNet(torch.nn.Module):
         self.n_outputs = n_outputs
         self.n_control_tracks = n_control_tracks
         self.verbose = verbose
-        
         self.name = name or "bpnet.{}.{}".format(n_filters, n_layers)
 
         # first convolution without dilation
         self.iconv = torch.nn.Conv1d(4, n_filters, kernel_size=conv1_kernel_size, padding='valid')
         self.irelu = torch.nn.ReLU()
 
+        if custom_dilations:
+            rconvs_kernel_size = 5
+            dilation_sched = [2,8,32,64,128]
+            # dilation_sched = [8,16,32,64,128,256]
+            self.rconvs = torch.nn.ModuleList([
+                torch.nn.Conv1d(n_filters, n_filters, kernel_size=rconvs_kernel_size, padding='valid', 
+                    dilation=dilation_sched[i-1]) for i in range(1, self.n_layers+1)
+            ])
+
         # residual dilated convolutions
-        self.rconvs = torch.nn.ModuleList([
-            torch.nn.Conv1d(n_filters, n_filters, kernel_size=rconvs_kernel_size, padding='valid', 
-                dilation=2**i) for i in range(1, self.n_layers+1)
-        ])
+        else:
+            self.rconvs = torch.nn.ModuleList([
+                torch.nn.Conv1d(n_filters, n_filters, kernel_size=rconvs_kernel_size, padding='valid', 
+                    dilation=2**i) for i in range(1, self.n_layers+1)
+            ])
 
         self.rrelus = torch.nn.ModuleList([
 			torch.nn.ReLU() for i in range(1, self.n_layers+1)
@@ -394,3 +404,189 @@ class BPNet(torch.nn.Module):
 
         transfer_weights(self, keras_model)
         keras_model.save(filename)
+
+
+
+
+
+class DoubleBPNet(BPNet):
+
+    def __init__(
+        self, 
+        out_dim=1000,
+        n_filters=64, 
+        n_layers=8, 
+        rconvs_kernel_size=3,
+        conv1_kernel_size=21,
+        profile_kernel_size=75,
+        n_outputs=1, 
+        n_control_tracks=0,
+        input_sizes=[4,768], 
+        profile_output_bias=True, 
+        count_output_bias=True, 
+        name=None, 
+        verbose=False,
+        dropout=False
+    ):
+        super().__init__()
+
+        self.out_dim = out_dim
+        self.n_filters = n_filters
+        self.n_layers = n_layers
+        self.n_outputs = n_outputs
+        self.n_control_tracks = n_control_tracks
+        self.verbose = verbose
+        self.name = name or "bpnet.{}.{}".format(n_filters, n_layers)
+        self.input_sizes = input_sizes
+
+        # first convolution without dilation
+        self.iconv1 = torch.nn.Conv1d(input_sizes[0], n_filters, kernel_size=conv1_kernel_size, padding='valid')
+        self.irelu1 = torch.nn.ReLU()
+
+        self.iconv2 = torch.nn.Conv1d(input_sizes[1], n_filters, kernel_size=conv1_kernel_size, padding='valid')
+        self.irelu2 = torch.nn.ReLU()
+
+
+        # residual dilated convolutions
+        self.rconvs1 = torch.nn.ModuleList([
+            torch.nn.Conv1d(n_filters, n_filters, kernel_size=rconvs_kernel_size, padding='valid', 
+                dilation=2**i) for i in range(1, self.n_layers+1)
+        ])
+
+        self.rrelus1 = torch.nn.ModuleList([
+			torch.nn.ReLU() for i in range(1, self.n_layers+1)
+		])
+
+        self.rconvs2 = torch.nn.ModuleList([
+            torch.nn.Conv1d(n_filters, n_filters, kernel_size=rconvs_kernel_size, padding='valid', 
+                dilation=2**i) for i in range(1, self.n_layers+1)
+        ])
+
+        self.rrelus2 = torch.nn.ModuleList([
+			torch.nn.ReLU() for i in range(1, self.n_layers+1)
+		])
+
+
+        # profile prediction
+        self.fconv = torch.nn.Conv1d(n_filters * 2, n_outputs, 
+            kernel_size=profile_kernel_size, padding='valid', bias=profile_output_bias)
+        
+        # count prediction
+        n_count_control = 1 if n_control_tracks > 0 else 0
+        self.global_avg_pool = torch.nn.AdaptiveAvgPool1d(1)
+        self.linear = torch.nn.Linear(n_filters * 2, 1, 
+            bias=count_output_bias)
+
+    def get_embs_after_crop(self, x):
+        assert x.shape[1] == self.input_sizes[0] + self.input_sizes[1]
+        x_onehot = x[:,:self.input_sizes[0],:]
+        x_lm = x[:,self.input_sizes[0]:,:]
+
+        x_onehot = self.irelu1(self.iconv1(x_onehot))
+        for i in range(self.n_layers):
+            conv_x = self.rrelus1[i](self.rconvs1[i](x_onehot))
+            crop_len = (x_onehot.shape[2] - conv_x.shape[2]) // 2
+            if crop_len > 0:
+                x_onehot = x_onehot[:, :, crop_len:-crop_len]
+            x_onehot = torch.add(x_onehot, conv_x)
+        
+        x_lm = self.irelu2(self.iconv2(x_lm))
+        for i in range(self.n_layers):
+            conv_x = self.rrelus2[i](self.rconvs2[i](x_lm))
+            crop_len = (x_lm.shape[2] - conv_x.shape[2]) // 2
+            if crop_len > 0:
+                x_lm = x_lm[:, :, crop_len:-crop_len]
+            x_lm = torch.add(x_lm, conv_x)
+
+        x = torch.cat([x_onehot, x_lm], dim=1)
+        return x
+
+
+
+class ConvBlock(torch.nn.Module):
+    """
+    Basic convolutional block.
+    Consists of a convolutional layer, a max pooling layer and a dropout layer.
+    """
+    def __init__(
+        self,
+        in_channels: int, 
+        out_channels: int, 
+        kernel_size: int, 
+        pool_size: int, 
+        dropout: float
+    ):
+        super().__init__()
+        self.conv = torch.nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, padding='same')
+        self.mp = torch.nn.MaxPool1d(kernel_size=pool_size, stride=pool_size)
+        self.do = torch.nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x: (batch_size, in_channels, seq_len)
+        x = F.relu(self.conv(x))  # (batch_size, out_channels, seq_len)
+        x = self.mp(x)  # (batch_size, out_channels, seq_len // pool_size)
+        x = self.do(x)  # (batch_size, out_channels, seq_len // pool_size)
+        return x
+    
+class DreamRNN(BPNet):
+
+    def __init__(
+        self, 
+        out_dim=1000,
+        n_filters=64, 
+        n_layers=8, 
+        rconvs_kernel_size=3,
+        conv1_kernel_size=21,
+        profile_kernel_size=75,
+        n_outputs=1, 
+        n_control_tracks=0, 
+        profile_output_bias=True, 
+        count_output_bias=True, 
+        name=None, 
+        verbose=False,
+        dropout=False
+    ):
+        super().__init__()
+        in_channels = 512
+        out_channels = 320
+        lstm_hidden_channels = 320
+        kernel_sizes = [9, 15]
+        pool_size = 1
+        dropout1 = 0.2
+        dropout2 = 0.2
+        self.do = torch.nn.Dropout(dropout2)
+        self.lstm = torch.nn.LSTM(input_size=in_channels, hidden_size=lstm_hidden_channels, batch_first=True, bidirectional=True)
+        self.conv_list1 = torch.nn.ModuleList([
+            ConvBlock(8, in_channels // len(kernel_sizes), k, pool_size, dropout1) for k in kernel_sizes
+        ])
+        self.conv_list2 = torch.nn.ModuleList([
+            ConvBlock(2 * lstm_hidden_channels, out_channels // len(kernel_sizes), k, pool_size, dropout1) for k in kernel_sizes
+        ])
+
+        self.fconv = torch.nn.Conv1d(out_channels, n_outputs, 
+            kernel_size=profile_kernel_size, padding='valid', bias=profile_output_bias)
+        
+        # count prediction
+        self.linear = torch.nn.Linear(out_channels, 1, 
+            bias=count_output_bias)
+
+
+    def get_embs_after_crop(self, x):
+        conv_outputs = [conv(x) for conv in self.conv_list1]  # [(batch_size, each_out_channels, seq_len // pool_size), ...]
+        # concatenate the outputs along the channel dimension
+        x = torch.cat(conv_outputs, dim=1)  # (batch_size, out_channels, seq_len // pool_size)
+        x = x.permute(0, 2, 1)  # (batch_size, seq_len, in_channels)
+        x, _ = self.lstm(x)  # (batch_size, seq_len, 2 * lstm_hidden_channels)
+        x = x.permute(0, 2, 1)  # (batch_size, 2 * lstm_hidden_channels, seq_len)
+        conv_outputs = [conv(x) for conv in self.conv_list2]  # [(batch_size, each_conv_out_channels, seq_len // pool_size), ...]
+
+        # concatenate the outputs along the channel dimension
+        x = torch.cat(conv_outputs, dim=1)  # (batch_size, conv_out_channels, seq_len // pool_size)
+        x = self.do(x)
+
+        return x
+
+
+
+
+

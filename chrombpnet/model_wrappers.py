@@ -570,6 +570,9 @@ class BPNetWrapper(ModelWrapper):
 		
 	def configure_optimizers(self):
 		optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001, eps=1e-7)
+		# scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.4, patience=3, min_lr=1e-8)
+		# schedule_info = {"scheduler": scheduler, "monitor": "val_loss", "interval": "epoch", "frequency": 1}
+		# return {"optimizer": optimizer, "scheduler": schedule_info}
 		return optimizer
 
 
@@ -748,20 +751,35 @@ def create_model_wrapper(
 def load_pretrained_model(args, checkpoint):
 	import os
 	wrapper_class = ArsenalChromBPNetWrapper if args.model_type == "arsenal-chrombpnet" else ChromBPNetWrapper
+	if args.bias_scaled is None and os.path.exists(os.path.join(args.data_dir, 'bias_scaled.h5')):
+		args.bias_scaled = os.path.join(args.data_dir, 'bias_scaled.h5')
 	if checkpoint is not None:
 		if checkpoint.endswith('.ckpt'):
-			model_wrapper = wrapper_class.load_from_checkpoint(checkpoint)
+			model_wrapper = wrapper_class.load_from_checkpoint(checkpoint, map_location='cpu')
+			if args.bias_scaled:
+				model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
+			else:
+				print(f"No bias model found")
 			return model_wrapper
 				
 		elif checkpoint.endswith('.pt'):
 			model_wrapper = wrapper_class(args)
 			model_wrapper.model.model.load_state_dict(torch.load(checkpoint, map_location='cpu'))
+			if args.bias_scaled:
+				model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
+			else:
+				print(f"No bias model found")
 			return model_wrapper
 		elif checkpoint.endswith('.h5'):  
 			model_wrapper = wrapper_class(args)
 			# For Keras H5 files, load using the from_keras method
 			print(f"Loading chrombpnet_wo_bias model from {checkpoint}")
 			model_wrapper.model.model = BPNet.from_keras(checkpoint)
+			if args.bias_scaled:
+				print(f"Loading bias model from {args.bias_scaled}")
+				model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
+			else:
+				print(f"No bias model found")
 			return model_wrapper
 	else:
 		model_wrapper = wrapper_class(args)

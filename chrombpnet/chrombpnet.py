@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from .bpnet import BPNet
+from .bpnet import BPNet, DoubleBPNet, DreamRNN
 
 
 class _Exp(nn.Module):
@@ -211,7 +211,7 @@ class ArsenalChromBPNet(nn.Module):
 			n_outputs=config.n_outputs, 
 			n_control_tracks=config.n_control_tracks, 
 			profile_output_bias=config.profile_output_bias, 
-			count_output_bias=config.count_output_bias, 
+			count_output_bias=config.count_output_bias,
 		)
 
 		self.model.iconv = torch.nn.Conv1d(config.input_embedding_dim, config.n_filters, kernel_size=config.conv1_kernel_size, padding='valid')
@@ -222,6 +222,8 @@ class ArsenalChromBPNet(nn.Module):
 		self._exp1 = _Exp()
 		self._exp2 = _Exp()
 		
+		self.batchnorm = torch.nn.BatchNorm1d(num_features=config.input_embedding_dim)
+
 		self.n_control_tracks = config.n_control_tracks
 
 		self.tf_style_reinit()
@@ -253,6 +255,7 @@ class ArsenalChromBPNet(nn.Module):
 		# keep last dim so it broadcasts over the 4-class channel; clamp for numerical stability
 		# entropy_metric = 2 + (probs * torch.log2(probs)).sum(-1, keepdim=True)
 		# probs_norm = entropy_metric * probs
+		probs_norm = probs
 		onehot_start = torch.ones_like(probs)
 		#Zero out everywhere except true indices
 		idx = tokens.unsqueeze(-1)
@@ -262,8 +265,28 @@ class ArsenalChromBPNet(nn.Module):
 		kept = kept.masked_fill(~valid.unsqueeze(-1), 0)
 		onehot_final = torch.zeros_like(onehot_start)
 		onehot_final.scatter_(2, clamped, kept)
-		probs_out = torch.cat((onehot_final, probs), dim=-1)
+		probs_out = torch.cat((onehot_final, probs_norm), dim=-1)
+		# probs_out = probs_norm
 		return probs_out
+
+	def combine_embeddings_onehot(self, embs, tokens):
+		#Calculate entropy-weighted probabilities
+		# keep last dim so it broadcasts over the 4-class channel; clamp for numerical stability
+		# entropy_metric = 2 + (probs * torch.log2(probs)).sum(-1, keepdim=True)
+		# probs_norm = entropy_metric * probs
+		onehot_start = torch.ones(size=[embs.shape[0], embs.shape[1], 4], device=embs.device)
+		#Zero out everywhere except true indices
+		idx = tokens.unsqueeze(-1)
+		clamped = idx.clamp(0, 3)
+		valid = (tokens >= 0) & (tokens < 4)
+		kept = onehot_start.gather(2, clamped)
+		kept = kept.masked_fill(~valid.unsqueeze(-1), 0)
+		onehot_final = torch.zeros_like(onehot_start)
+		onehot_final.scatter_(2, clamped, kept)
+		embs_out = torch.cat((onehot_final, embs), dim=-1)
+		# probs_out = probs_norm
+		return embs_out
+
 
 	def get_likelihoods(self, tokens):
 		if self.seq_input_size == self.arsenal_input_size:
@@ -332,6 +355,8 @@ class ArsenalChromBPNet(nn.Module):
 			final_pred = self.arsenal_model.embed(tokens[:,-1*self.arsenal_input_size:], self.category)
 			embs = torch.cat((embs, final_pred[:,-1*remainder:]), dim=1)
 
+		embs = self.batchnorm(embs.transpose(1,2)).transpose(1,2)
+		# embs = self.combine_embeddings_onehot(embs, tokens)
 		return embs
 
 
@@ -372,9 +397,9 @@ class ArsenalChromBPNet(nn.Module):
 		bias_profile, bias_counts = self.bias(x)
 
 		y_profile = acc_profile + bias_profile
-		# y_counts = self._log(self._exp1(acc_counts) + self._exp2(bias_counts))
-		counts_cat = torch.cat((acc_counts, bias_counts), dim=-1)
-		y_counts = torch.logsumexp(counts_cat, dim=-1)
+		y_counts = self._log(self._exp1(acc_counts) + self._exp2(bias_counts))
+		# counts_cat = torch.cat((acc_counts, bias_counts), dim=-1)
+		# y_counts = torch.logsumexp(counts_cat, dim=-1)
 		
 		# DO NOT SQUEEZE y_counts, as it is needed for running deep_lift_shap
 		return y_profile.squeeze(1), y_counts #.squeeze() 
@@ -416,7 +441,10 @@ class ArsenalChromBPNetNoBias(ArsenalChromBPNet):
 		if self.arsenal_output_type == "embedding":
 			x_embs = self.get_embeddings(tokens) #We don't transpose because bpnet code does it for us if dimension is not 4
 		elif self.arsenal_output_type == "likelihood":
-			x_embs = self.get_likelihoods(tokens).transpose(1,2)
+			x_embs = self.get_likelihoods(tokens)
+			if x_embs.shape[-1] == 4:
+				x_embs = x_embs.transpose(1,2)
+
 
 
 		acc_profile, acc_counts = self.model(x_embs)
