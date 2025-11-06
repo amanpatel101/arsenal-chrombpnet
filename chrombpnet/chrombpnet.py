@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 
 from .bpnet import BPNet, DoubleBPNet, DreamRNN
+import os
+import sys
 arsenal_dir = os.environ.get("ARSENAL_MODEL_DIR", "")
 sys.path.append(f"{arsenal_dir}/src/regulatory_lm/")
 from modeling.model import *
