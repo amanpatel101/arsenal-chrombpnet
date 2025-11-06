@@ -4,6 +4,9 @@ import torch
 import torch.nn as nn
 
 from .bpnet import BPNet, DoubleBPNet, DreamRNN
+arsenal_dir = os.environ.get("ARSENAL_MODEL_DIR", "")
+sys.path.append(f"{arsenal_dir}/src/regulatory_lm/")
+from modeling.model import *
 
 
 class _Exp(nn.Module):
@@ -222,8 +225,6 @@ class ArsenalChromBPNet(nn.Module):
 		self._exp1 = _Exp()
 		self._exp2 = _Exp()
 		
-		self.batchnorm = torch.nn.BatchNorm1d(num_features=config.input_embedding_dim)
-
 		self.n_control_tracks = config.n_control_tracks
 
 		self.tf_style_reinit()
@@ -248,6 +249,28 @@ class ArsenalChromBPNet(nn.Module):
 		n_mask = (X.sum(dim=-1) == 0)
 		tokens[n_mask] = 4
 		return tokens
+
+	def get_avg_embeddings(self, X, n=4):
+		layers = [m for m in self.arsenal_model.modules() if type(m) in [TransformerROPEEncoderLayer, torch.nn.TransformerEncoderLayer]]
+		# Pick last n layers (or adjust layer-type filter as needed)
+		target_layers = layers[-n:]
+		activations = []
+		hooks = []
+		
+		def hook_fn(module, input, output):
+			activations.append(output)
+		
+		# Register hooks
+		hooks = [layer.register_forward_hook(hook_fn) for layer in target_layers]
+		
+		# Do inference (forward pass)
+		_ = self.arsenal_model(X, self.category)
+		
+		# Remove hooks to avoid memory leaks
+		for h in hooks:
+			h.remove()
+		
+		return sum(activations) / len(activations)
 
 
 	def normalize_probs(self, probs, tokens):
@@ -314,31 +337,9 @@ class ArsenalChromBPNet(nn.Module):
 
 		return probs
 
-	# def get_likelihoods(self, tokens):
-	# 	if self.seq_input_size == self.arsenal_input_size:
-	# 		logits = self.arsenal_model(tokens, self.category)
-	# 	#Else case - adapting to different input sizes
-	# 	#We basically break up the sequence into chunks of the model input length
-	# 	#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the logits for previously unpredicted tokens
-	# 	else:
-	# 		full_partitions, remainder = self.seq_input_size // self.arsenal_input_size, self.seq_input_size % self.arsenal_input_size
-	# 		for part in range(full_partitions):
-	# 			curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
-	# 			if part == 0:
-	# 				logits = self.arsenal_model(curr_tokens, self.category)
-	# 			else:
-	# 				curr_logits = self.arsenal_model(curr_tokens, self.category)
-	# 				logits = torch.cat((logits, curr_logits), dim=1)
-	# 		#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
-	# 		final_pred = self.arsenal_model(tokens[:,-1*self.arsenal_input_size:], self.category)
-	# 		logits = torch.cat((logits, final_pred[:,-1*remainder:]), dim=1)
-	# 	probs = self.softmax(logits)
-
-	# 	return probs
-
 	def get_embeddings(self, tokens):
 		if self.seq_input_size == self.arsenal_input_size:
-			embs = self.arsenal_model.embed(tokens, self.category)
+			embs = self.get_avg_embeddings(tokens)
 		#Else case - adapting to different input sizes
 		#We basically break up the sequence into chunks of the model input length
 		#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the embeddings for previously unpredicted tokens
@@ -347,17 +348,38 @@ class ArsenalChromBPNet(nn.Module):
 			for part in range(full_partitions):
 				curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
 				if part == 0:
-					embs = self.arsenal_model.embed(curr_tokens, self.category)
+					embs = self.get_avg_embeddings(curr_tokens)
 				else:
-					curr_embs = self.arsenal_model.embed(curr_tokens, self.category)
+					curr_embs = self.get_avg_embeddings(curr_tokens)
 					embs = torch.cat((embs, curr_embs), dim=1)
 			#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
-			final_pred = self.arsenal_model.embed(tokens[:,-1*self.arsenal_input_size:], self.category)
+			final_pred = self.get_avg_embeddings(tokens[:,-1*self.arsenal_input_size:])
 			embs = torch.cat((embs, final_pred[:,-1*remainder:]), dim=1)
 
-		embs = self.batchnorm(embs.transpose(1,2)).transpose(1,2)
-		# embs = self.combine_embeddings_onehot(embs, tokens)
 		return embs
+
+	# def get_embeddings(self, tokens):
+	# 	if self.seq_input_size == self.arsenal_input_size:
+	# 		embs = self.arsenal_model.embed(tokens, self.category)
+	# 	#Else case - adapting to different input sizes
+	# 	#We basically break up the sequence into chunks of the model input length
+	# 	#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the embeddings for previously unpredicted tokens
+	# 	else:
+	# 		full_partitions, remainder = self.seq_input_size // self.arsenal_input_size, self.seq_input_size % self.arsenal_input_size
+	# 		for part in range(full_partitions):
+	# 			curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
+	# 			if part == 0:
+	# 				embs = self.arsenal_model.embed(curr_tokens, self.category)
+	# 			else:
+	# 				curr_embs = self.arsenal_model.embed(curr_tokens, self.category)
+	# 				embs = torch.cat((embs, curr_embs), dim=1)
+	# 		#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
+	# 		final_pred = self.arsenal_model.embed(tokens[:,-1*self.arsenal_input_size:], self.category)
+	# 		embs = torch.cat((embs, final_pred[:,-1*remainder:]), dim=1)
+
+	# 	embs = self.batchnorm(embs.transpose(1,2)).transpose(1,2)
+	# 	# embs = self.combine_embeddings_onehot(embs, tokens)
+	# 	return embs
 
 
 	def forward(self, x, **kwargs):
