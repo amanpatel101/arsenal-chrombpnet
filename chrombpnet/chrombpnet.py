@@ -299,7 +299,8 @@ class ArsenalChromBPNet(nn.Module):
 		# keep last dim so it broadcasts over the 4-class channel; clamp for numerical stability
 		# entropy_metric = 2 + (probs * torch.log2(probs)).sum(-1, keepdim=True)
 		# probs_norm = entropy_metric * probs
-		onehot_start = torch.ones(size=[embs.shape[0], embs.shape[1], 4], device=embs.device)
+		# onehot_start = torch.ones(size=[embs.shape[0], embs.shape[1], 4], device=embs.device)
+		onehot_start = self.projection_layer(embs) / torch.exp(self.temperature)
 		#Zero out everywhere except true indices
 		idx = tokens.unsqueeze(-1)
 		clamped = idx.clamp(0, 3)
@@ -308,9 +309,9 @@ class ArsenalChromBPNet(nn.Module):
 		kept = kept.masked_fill(~valid.unsqueeze(-1), 0)
 		onehot_final = torch.zeros_like(onehot_start)
 		onehot_final.scatter_(2, clamped, kept)
-		embs_out = torch.cat((onehot_final, embs), dim=-1)
+		# embs_out = torch.cat((onehot_final, embs), dim=-1)
 		# probs_out = probs_norm
-		return embs_out
+		return onehot_final
 
 
 	def get_likelihoods(self, tokens):
