@@ -226,8 +226,8 @@ def train(args):
         val_check_interval=None,
         # strategy=DDPStrategy(find_unused_parameters=True),
         callbacks=[
-            L.pytorch.callbacks.EarlyStopping(monitor='val_loss', patience=5),
-            L.pytorch.callbacks.ModelCheckpoint(monitor='val_loss', save_top_k=1, mode='min', filename='best_model', save_last=True),
+            L.pytorch.callbacks.EarlyStopping(monitor='val_count_pearson', patience=5, mode="max"),
+            L.pytorch.callbacks.ModelCheckpoint(monitor='val_count_pearson', save_top_k=1, mode='max', filename='best_model', save_last=True),
         ],
         logger=loggers, # L.pytorch.loggers.TensorBoardLogger
         fast_dev_run=args.fast_dev_run,
