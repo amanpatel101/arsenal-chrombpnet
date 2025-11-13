@@ -196,6 +196,7 @@ class ArsenalChromBPNet(nn.Module):
 
 		self.seq_input_size = config.input_len
 		self.arsenal_input_size = config.arsenal_input_size
+		self.num_layers_avg = config.num_layers_avg
 		self.softmax = torch.nn.Softmax(dim=-1)
 
 		# Store category as buffer so it moves with .to()
@@ -255,6 +256,7 @@ class ArsenalChromBPNet(nn.Module):
 	def get_avg_embeddings(self, X, n=4):
 		layers = [m for m in self.arsenal_model.modules() if type(m) in [TransformerROPEEncoderLayer, torch.nn.TransformerEncoderLayer]]
 		# Pick last n layers (or adjust layer-type filter as needed)
+		# target_layers = layers[-n-4:-n]
 		target_layers = layers[-n:]
 		activations = []
 		hooks = []
@@ -342,7 +344,7 @@ class ArsenalChromBPNet(nn.Module):
 
 	def get_embeddings(self, tokens):
 		if self.seq_input_size == self.arsenal_input_size:
-			embs = self.get_avg_embeddings(tokens)
+			embs = self.get_avg_embeddings(tokens, self.num_layers_avg)
 		#Else case - adapting to different input sizes
 		#We basically break up the sequence into chunks of the model input length
 		#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the embeddings for previously unpredicted tokens
@@ -351,12 +353,12 @@ class ArsenalChromBPNet(nn.Module):
 			for part in range(full_partitions):
 				curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
 				if part == 0:
-					embs = self.get_avg_embeddings(curr_tokens)
+					embs = self.get_avg_embeddings(curr_tokens, self.num_layers_avg)
 				else:
-					curr_embs = self.get_avg_embeddings(curr_tokens)
+					curr_embs = self.get_avg_embeddings(curr_tokens, self.num_layers_avg)
 					embs = torch.cat((embs, curr_embs), dim=1)
 			#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
-			final_pred = self.get_avg_embeddings(tokens[:,-1*self.arsenal_input_size:])
+			final_pred = self.get_avg_embeddings(tokens[:,-1*self.arsenal_input_size:], self.num_layers_avg)
 			embs = torch.cat((embs, final_pred[:,-1*remainder:]), dim=1)
 
 		return embs
