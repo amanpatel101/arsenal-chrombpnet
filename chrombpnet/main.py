@@ -32,8 +32,9 @@ from lightning.pytorch.strategies import DDPStrategy
 # torch.set_float32_matmul_precision('medium')
 
 # Set random seed for reproducibility
-# L.seed_everything(0)
 L.seed_everything(1234)
+# L.seed_everything(0)
+# L.seed_everything(5678)
 
 # Import local modules
 from chrombpnet.chrombpnet import BPNet, ChromBPNet, ArsenalChromBPNet

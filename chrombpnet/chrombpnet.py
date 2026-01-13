@@ -224,6 +224,13 @@ class ArsenalChromBPNet(nn.Module):
 
 		self.bias = BPNet(out_dim=config.out_dim, n_layers=4, n_filters=128)
 
+		###MAYBE REMOVE######
+		# self.layernorms = torch.nn.ModuleList([torch.nn.LayerNorm(config.input_embedding_dim) for x in range(self.num_layers_avg)])
+		#####################
+
+		# self.layer_coeffs = torch.nn.Parameter(data=torch.zeros([config.num_layers_avg, 1, 1, 1]))
+		# self.layer_softmax = torch.nn.Softmax(dim=0)
+
 		self._log = _Log()
 		self._exp1 = _Exp()
 		self._exp2 = _Exp()
@@ -258,6 +265,7 @@ class ArsenalChromBPNet(nn.Module):
 		# Pick last n layers (or adjust layer-type filter as needed)
 		# target_layers = layers[-n-4:-n]
 		target_layers = layers[-n:]
+		# target_layers = layers[-10:-4]
 		activations = []
 		hooks = []
 		
@@ -274,6 +282,17 @@ class ArsenalChromBPNet(nn.Module):
 		for h in hooks:
 			h.remove()
 		
+		###Let's take a weighted average###
+		# act_tensor = torch.stack(activations)
+		# norm_coeffs = self.layer_softmax(self.layer_coeffs)
+		# final_acts = norm_coeffs * act_tensor 
+
+		#######Run LayerNorm (maybe remove)
+		# activations = [self.layernorms[x](activations[x]) for x in range(len(activations))]
+		############
+
+		# return final_acts.sum(0)
+		#####End weighted average#######
 		return sum(activations) / len(activations)
 
 
@@ -316,53 +335,177 @@ class ArsenalChromBPNet(nn.Module):
 		return onehot_final
 
 
+	# def get_likelihoods(self, tokens):
+	# 	if self.seq_input_size == self.arsenal_input_size:
+	# 		logits = self.arsenal_model(tokens, self.category)
+	# 		probs = self.softmax(logits)
+	# 		return self.normalize_probs(probs, tokens)
+	# 	#Else case - adapting to different input sizes
+	# 	#We basically break up the sequence into chunks of the model input length
+	# 	#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the logits for previously unpredicted tokens
+	# 	else:
+	# 		full_partitions, remainder = self.seq_input_size // self.arsenal_input_size, self.seq_input_size % self.arsenal_input_size
+	# 		for part in range(full_partitions):
+	# 			curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
+	# 			if part == 0:
+	# 				logits = self.arsenal_model(curr_tokens, self.category)
+	# 				probs = self.normalize_probs(self.softmax(logits), curr_tokens)
+	# 			else:
+	# 				curr_logits = self.arsenal_model(curr_tokens, self.category)
+	# 				curr_probs = self.normalize_probs(self.softmax(curr_logits), curr_tokens)
+	# 				probs = torch.cat((probs, curr_probs), dim=1)
+	# 		#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
+	# 		final_pred = self.arsenal_model(tokens[:,-1*self.arsenal_input_size:], self.category)
+	# 		final_probs = self.normalize_probs(self.softmax(final_pred), tokens[:,-1*self.arsenal_input_size:])
+	# 		probs = torch.cat((probs, final_probs[:,-1*remainder:]), dim=1)
+
+	# 	return probs
+
 	def get_likelihoods(self, tokens):
 		if self.seq_input_size == self.arsenal_input_size:
 			logits = self.arsenal_model(tokens, self.category)
 			probs = self.softmax(logits)
 			return self.normalize_probs(probs, tokens)
-		#Else case - adapting to different input sizes
-		#We basically break up the sequence into chunks of the model input length
-		#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the logits for previously unpredicted tokens
 		else:
-			full_partitions, remainder = self.seq_input_size // self.arsenal_input_size, self.seq_input_size % self.arsenal_input_size
-			for part in range(full_partitions):
-				curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
-				if part == 0:
-					logits = self.arsenal_model(curr_tokens, self.category)
-					probs = self.normalize_probs(self.softmax(logits), curr_tokens)
-				else:
+			# Calculate center-aligned chunking
+			seq_len = self.seq_input_size
+			chunk_size = self.arsenal_input_size
+			center = seq_len // 2
+			
+			# Position the first chunk centered on the sequence center
+			first_start = center - chunk_size // 2
+			first_end = first_start + chunk_size
+			
+			# Get center chunk first
+			center_tokens = tokens[:, first_start:first_end]
+			center_logits = self.arsenal_model(center_tokens, self.category)
+			probs = self.normalize_probs(self.softmax(center_logits), center_tokens)
+			
+			# Expand outward from center
+			# Right side chunks
+			right_start = first_end
+			while right_start < seq_len:
+				if right_start + chunk_size <= seq_len:
+					# Full chunk fits
+					curr_tokens = tokens[:, right_start:right_start + chunk_size]
 					curr_logits = self.arsenal_model(curr_tokens, self.category)
 					curr_probs = self.normalize_probs(self.softmax(curr_logits), curr_tokens)
 					probs = torch.cat((probs, curr_probs), dim=1)
-			#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
-			final_pred = self.arsenal_model(tokens[:,-1*self.arsenal_input_size:], self.category)
-			final_probs = self.normalize_probs(self.softmax(final_pred), tokens[:,-1*self.arsenal_input_size:])
-			probs = torch.cat((probs, final_probs[:,-1*remainder:]), dim=1)
+					right_start += chunk_size
+				else:
+					# Partial chunk - predict from end and take only stragglers
+					remainder = seq_len - right_start
+					end_tokens = tokens[:, -chunk_size:]
+					end_logits = self.arsenal_model(end_tokens, self.category)
+					end_probs = self.normalize_probs(self.softmax(end_logits), end_tokens)
+					probs = torch.cat((probs, end_probs[:, -remainder:]), dim=1)
+					break
+			
+			# Left side chunks (prepend, so reverse order)
+			left_end = first_start
+			left_chunks = []
+			while left_end > 0:
+				if left_end - chunk_size >= 0:
+					# Full chunk fits
+					curr_tokens = tokens[:, left_end - chunk_size:left_end]
+					curr_logits = self.arsenal_model(curr_tokens, self.category)
+					curr_probs = self.normalize_probs(self.softmax(curr_logits), curr_tokens)
+					left_chunks.insert(0, curr_probs)
+					left_end -= chunk_size
+				else:
+					# Partial chunk - predict from start and take only stragglers
+					remainder = left_end
+					start_tokens = tokens[:, :chunk_size]
+					start_logits = self.arsenal_model(start_tokens, self.category)
+					start_probs = self.normalize_probs(self.softmax(start_logits), start_tokens)
+					left_chunks.insert(0, start_probs[:, :remainder])
+					break
+			
+			# Concatenate all: left stragglers + left chunks + center + right chunks + right stragglers
+			if left_chunks:
+				probs = torch.cat(left_chunks + [probs], dim=1)
+		
+		return probs	
 
-		return probs
+	# def get_embeddings(self, tokens):
+	# 	if self.seq_input_size == self.arsenal_input_size:
+	# 		embs = self.get_avg_embeddings(tokens, self.num_layers_avg)
+	# 	#Else case - adapting to different input sizes
+	# 	#We basically break up the sequence into chunks of the model input length
+	# 	#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the embeddings for previously unpredicted tokens
+	# 	else:
+	# 		full_partitions, remainder = self.seq_input_size // self.arsenal_input_size, self.seq_input_size % self.arsenal_input_size
+	# 		for part in range(full_partitions):
+	# 			curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
+	# 			if part == 0:
+	# 				embs = self.get_avg_embeddings(curr_tokens, self.num_layers_avg)
+	# 			else:
+	# 				curr_embs = self.get_avg_embeddings(curr_tokens, self.num_layers_avg)
+	# 				embs = torch.cat((embs, curr_embs), dim=1)
+	# 		#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
+	# 		final_pred = self.get_avg_embeddings(tokens[:,-1*self.arsenal_input_size:], self.num_layers_avg)
+	# 		embs = torch.cat((embs, final_pred[:,-1*remainder:]), dim=1)
+
+	# 	return embs
 
 	def get_embeddings(self, tokens):
 		if self.seq_input_size == self.arsenal_input_size:
 			embs = self.get_avg_embeddings(tokens, self.num_layers_avg)
-		#Else case - adapting to different input sizes
-		#We basically break up the sequence into chunks of the model input length
-		#Any remaining tokens are added by predicting the very end of the sequence and only concatenating the embeddings for previously unpredicted tokens
 		else:
-			full_partitions, remainder = self.seq_input_size // self.arsenal_input_size, self.seq_input_size % self.arsenal_input_size
-			for part in range(full_partitions):
-				curr_tokens = tokens[:,part * self.arsenal_input_size : part * self.arsenal_input_size + self.arsenal_input_size]
-				if part == 0:
-					embs = self.get_avg_embeddings(curr_tokens, self.num_layers_avg)
-				else:
+			# Calculate center-aligned chunking
+			seq_len = self.seq_input_size
+			chunk_size = self.arsenal_input_size
+			center = seq_len // 2
+			
+			# Position the first chunk centered on the sequence center
+			first_start = center - chunk_size // 2
+			first_end = first_start + chunk_size
+			
+			# Get center chunk first
+			center_tokens = tokens[:, first_start:first_end]
+			embs = self.get_avg_embeddings(center_tokens, self.num_layers_avg)
+			
+			# Expand outward from center
+			# Right side chunks
+			right_start = first_end
+			while right_start < seq_len:
+				if right_start + chunk_size <= seq_len:
+					# Full chunk fits
+					curr_tokens = tokens[:, right_start:right_start + chunk_size]
 					curr_embs = self.get_avg_embeddings(curr_tokens, self.num_layers_avg)
 					embs = torch.cat((embs, curr_embs), dim=1)
-			#To account for the stragglers, we predict the very end of the sequence but only concatenate the stragglers
-			final_pred = self.get_avg_embeddings(tokens[:,-1*self.arsenal_input_size:], self.num_layers_avg)
-			embs = torch.cat((embs, final_pred[:,-1*remainder:]), dim=1)
-
+					right_start += chunk_size
+				else:
+					# Partial chunk - predict from end and take only stragglers
+					remainder = seq_len - right_start
+					end_tokens = tokens[:, -chunk_size:]
+					end_embs = self.get_avg_embeddings(end_tokens, self.num_layers_avg)
+					embs = torch.cat((embs, end_embs[:, -remainder:]), dim=1)
+					break
+			
+			# Left side chunks (prepend, so reverse order)
+			left_end = first_start
+			left_chunks = []
+			while left_end > 0:
+				if left_end - chunk_size >= 0:
+					# Full chunk fits
+					curr_tokens = tokens[:, left_end - chunk_size:left_end]
+					curr_embs = self.get_avg_embeddings(curr_tokens, self.num_layers_avg)
+					left_chunks.insert(0, curr_embs)
+					left_end -= chunk_size
+				else:
+					# Partial chunk - predict from start and take only stragglers
+					remainder = left_end
+					start_tokens = tokens[:, :chunk_size]
+					start_embs = self.get_avg_embeddings(start_tokens, self.num_layers_avg)
+					left_chunks.insert(0, start_embs[:, :remainder])
+					break
+			
+			# Concatenate all: left stragglers + left chunks + center + right chunks + right stragglers
+			if left_chunks:
+				embs = torch.cat(left_chunks + [embs], dim=1)
+		
 		return embs
-
 	# def get_embeddings(self, tokens):
 	# 	if self.seq_input_size == self.arsenal_input_size:
 	# 		embs = self.arsenal_model.embed(tokens, self.category)
