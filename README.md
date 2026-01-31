@@ -33,6 +33,7 @@ Here is the [genome browser](https://epigenomegateway.wustl.edu/browser2022/?blo
 #### Install from source
 ```
 pip install git+https://github.com/amanpatel101/arsenal-chrombpnet.git
+pip install rotary-embedding-torch==0.8.9
 ```
 
  
