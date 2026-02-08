@@ -224,13 +224,6 @@ class ArsenalChromBPNet(nn.Module):
 
 		self.bias = BPNet(out_dim=config.out_dim, n_layers=4, n_filters=128)
 
-		###MAYBE REMOVE######
-		# self.layernorms = torch.nn.ModuleList([torch.nn.LayerNorm(config.input_embedding_dim) for x in range(self.num_layers_avg)])
-		#####################
-
-		# self.layer_coeffs = torch.nn.Parameter(data=torch.zeros([config.num_layers_avg, 1, 1, 1]))
-		# self.layer_softmax = torch.nn.Softmax(dim=0)
-
 		self._log = _Log()
 		self._exp1 = _Exp()
 		self._exp2 = _Exp()
@@ -261,6 +254,10 @@ class ArsenalChromBPNet(nn.Module):
 		return tokens
 
 	def get_avg_embeddings(self, X, n=4):
+		'''
+		This function gets predictions for the last n embeddings of the ARSENAL model and averages them
+		Intended to be used as part of the model's forward pass
+		'''
 		layers = [m for m in self.arsenal_model.modules() if type(m) in [TransformerROPEEncoderLayer, torch.nn.TransformerEncoderLayer]]
 		# Pick last n layers (or adjust layer-type filter as needed)
 		# target_layers = layers[-n-4:-n]
@@ -282,17 +279,6 @@ class ArsenalChromBPNet(nn.Module):
 		for h in hooks:
 			h.remove()
 		
-		###Let's take a weighted average###
-		# act_tensor = torch.stack(activations)
-		# norm_coeffs = self.layer_softmax(self.layer_coeffs)
-		# final_acts = norm_coeffs * act_tensor 
-
-		#######Run LayerNorm (maybe remove)
-		# activations = [self.layernorms[x](activations[x]) for x in range(len(activations))]
-		############
-
-		# return final_acts.sum(0)
-		#####End weighted average#######
 		return sum(activations) / len(activations)
 
 
@@ -403,6 +389,12 @@ class ArsenalChromBPNet(nn.Module):
 
 
 	def get_embeddings(self, tokens):
+		'''
+		This function takes in tokens and gets ARSENAL embeddings from them. 
+		Usually, ARSENAL's input size is smaller than the sequence length. In that case, we chunk the sequence. 
+		We start at the center and extend out in both directions. 
+		If there are stragglers at either end, we get their embeddings using predictions from the beginning/end of the sequence. 
+		'''
 		if self.seq_input_size == self.arsenal_input_size:
 			embs = self.get_avg_embeddings(tokens, self.num_layers_avg)
 		else:
